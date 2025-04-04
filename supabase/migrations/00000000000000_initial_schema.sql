@@ -13,7 +13,6 @@ CREATE TABLE users (
     id UUID PRIMARY KEY REFERENCES auth.users(id),
     full_name TEXT NOT NULL,
     email TEXT NOT NULL UNIQUE,
-    role TEXT NOT NULL CHECK (role IN ('admin', 'student', 'teacher')),
     university_id UUID REFERENCES universities(id),
     created_at TIMESTAMPTZ DEFAULT NOW()
 );
@@ -60,25 +59,11 @@ ALTER TABLE sections ENABLE ROW LEVEL SECURITY;
 -- Create policies
 
 -- Universities policies
-CREATE POLICY "Allow admins to manage universities"
+CREATE POLICY "Allow authenticated users to manage universities"
     ON universities
     FOR ALL
     TO authenticated
-    USING (EXISTS (
-        SELECT 1 FROM users
-        WHERE users.id = auth.uid()
-        AND users.role = 'admin'
-    ));
-
-CREATE POLICY "Allow users to view their university"
-    ON universities
-    FOR SELECT
-    TO authenticated
-    USING (EXISTS (
-        SELECT 1 FROM users
-        WHERE users.id = auth.uid()
-        AND users.university_id = universities.id
-    ));
+    USING (true);
 
 -- Users policies
 CREATE POLICY "Users can view their own record"
@@ -95,90 +80,29 @@ CREATE POLICY "Users can update their own record"
     WITH CHECK (auth.uid() = id);
 
 -- Programs policies
-CREATE POLICY "Allow university members to manage programs"
+CREATE POLICY "Allow authenticated users to manage programs"
     ON programs
     FOR ALL
     TO authenticated
-    USING (EXISTS (
-        SELECT 1 FROM users
-        WHERE users.id = auth.uid()
-        AND users.university_id = programs.university_id
-    ));
+    USING (true);
 
 -- Branches policies
-CREATE POLICY "Allow university members to view branches"
-    ON branches
-    FOR SELECT
-    TO authenticated
-    USING (EXISTS (
-        SELECT 1 FROM users u
-        JOIN programs p ON p.university_id = u.university_id
-        WHERE u.id = auth.uid()
-        AND branches.program_id = p.id
-    ));
-
-CREATE POLICY "Allow admins to manage branches"
+CREATE POLICY "Allow authenticated users to manage branches"
     ON branches
     FOR ALL
     TO authenticated
-    USING (EXISTS (
-        SELECT 1 FROM users u
-        JOIN programs p ON p.university_id = u.university_id
-        WHERE u.id = auth.uid()
-        AND u.role = 'admin'
-        AND branches.program_id = p.id
-    ));
+    USING (true);
 
 -- Years policies
-CREATE POLICY "Allow university members to view years"
-    ON years
-    FOR SELECT
-    TO authenticated
-    USING (EXISTS (
-        SELECT 1 FROM users u
-        JOIN programs p ON p.university_id = u.university_id
-        JOIN branches b ON b.program_id = p.id
-        WHERE u.id = auth.uid()
-        AND years.branch_id = b.id
-    ));
-
-CREATE POLICY "Allow admins to manage years"
+CREATE POLICY "Allow authenticated users to manage years"
     ON years
     FOR ALL
     TO authenticated
-    USING (EXISTS (
-        SELECT 1 FROM users u
-        JOIN programs p ON p.university_id = u.university_id
-        JOIN branches b ON b.program_id = p.id
-        WHERE u.id = auth.uid()
-        AND u.role = 'admin'
-        AND years.branch_id = b.id
-    ));
+    USING (true);
 
 -- Sections policies
-CREATE POLICY "Allow university members to view sections"
-    ON sections
-    FOR SELECT
-    TO authenticated
-    USING (EXISTS (
-        SELECT 1 FROM users u
-        JOIN programs p ON p.university_id = u.university_id
-        JOIN branches b ON b.program_id = p.id
-        JOIN years y ON y.branch_id = b.id
-        WHERE u.id = auth.uid()
-        AND sections.year_id = y.id
-    ));
-
-CREATE POLICY "Allow admins to manage sections"
+CREATE POLICY "Allow authenticated users to manage sections"
     ON sections
     FOR ALL
     TO authenticated
-    USING (EXISTS (
-        SELECT 1 FROM users u
-        JOIN programs p ON p.university_id = u.university_id
-        JOIN branches b ON b.program_id = p.id
-        JOIN years y ON y.branch_id = b.id
-        WHERE u.id = auth.uid()
-        AND u.role = 'admin'
-        AND sections.year_id = y.id
-    )); 
+    USING (true); 

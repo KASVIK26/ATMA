@@ -3,6 +3,7 @@
 import { createContext, useContext, useEffect, useState } from 'react'
 import { User } from '@supabase/supabase-js'
 import { supabase } from './supabase'
+import { initializeBuckets } from './storage'
 
 type AuthContextType = {
   user: User | null
@@ -31,6 +32,8 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
             session.user.email!,
             session.user.user_metadata.full_name || 'User'
           )
+          // Initialize storage buckets after successful authentication
+          await initializeBuckets()
         } catch (error) {
           console.error('Profile creation error during session check:', error)
         }
@@ -51,6 +54,8 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
             session.user.email!,
             session.user.user_metadata.full_name || 'User'
           )
+          // Initialize storage buckets after successful authentication
+          await initializeBuckets()
         } catch (error) {
           console.error('Profile creation error during auth state change:', error)
         }
