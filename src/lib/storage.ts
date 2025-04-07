@@ -2,63 +2,141 @@
 
 import { supabase } from './supabase'
 
-const TIMETABLE_BUCKET = 'timetables'
-const ENROLLMENT_BUCKET = 'enrollments'
+export const TIMETABLE_BUCKET = 'timetables'
+export const ENROLLMENT_BUCKET = 'enrollments'
 
-type FileType = 'timetable' | 'enrollment'
+export type FileType = 'timetable' | 'enrollment'
 
 // Initialize storage buckets
 export async function initializeBuckets() {
-  // Create timetables bucket if it doesn't exist
-  const { data: timeTableBucket, error: timeTableError } = await supabase
-    .storage
-    .createBucket(TIMETABLE_BUCKET, {
-      public: false,
-      fileSizeLimit: 5242880, // 5MB
-      allowedMimeTypes: ['application/pdf', 'image/jpeg', 'image/png']
-    })
+  try {
+    // First check if user is authenticated
+    const { data: { session }, error: authError } = await supabase.auth.getSession()
+    if (authError || !session) {
+      console.log('User not authenticated, skipping bucket initialization')
+      return
+    }
 
-  // Create enrollments bucket if it doesn't exist
-  const { data: enrollmentBucket, error: enrollmentError } = await supabase
-    .storage
-    .createBucket(ENROLLMENT_BUCKET, {
-      public: false,
-      fileSizeLimit: 5242880, // 5MB
-      allowedMimeTypes: ['application/pdf', 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet', 'application/vnd.ms-excel']
-    })
+    // Create timetables bucket if it doesn't exist
+    const { error: timeTableError } = await supabase
+      .storage
+      .createBucket(TIMETABLE_BUCKET, {
+        public: false,
+        fileSizeLimit: 5242880, // 5MB
+        allowedMimeTypes: [
+          'application/vnd.openxmlformats-officedocument.wordprocessingml.document' // .docx
+        ]
+      })
 
-  if (timeTableError && timeTableError.message !== 'Bucket already exists') {
-    console.error('Error creating timetable bucket:', timeTableError)
-  }
-  if (enrollmentError && enrollmentError.message !== 'Bucket already exists') {
-    console.error('Error creating enrollment bucket:', enrollmentError)
+    // Create enrollments bucket if it doesn't exist
+    const { error: enrollmentError } = await supabase
+      .storage
+      .createBucket(ENROLLMENT_BUCKET, {
+        public: false,
+        fileSizeLimit: 5242880, // 5MB
+        allowedMimeTypes: [
+          'application/vnd.openxmlformats-officedocument.wordprocessingml.document', // .docx
+          'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet', // .xlsx
+          'application/vnd.ms-excel' // .xls
+        ]
+      })
+
+    // Only log non-existence errors
+    if (timeTableError && !timeTableError.message.includes('already exists')) {
+      console.error('Error creating timetable bucket:', timeTableError)
+    }
+    if (enrollmentError && !enrollmentError.message.includes('already exists')) {
+      console.error('Error creating enrollment bucket:', enrollmentError)
+    }
+  } catch (error) {
+    console.error('Error initializing buckets:', error)
   }
 }
 
 // Upload file to appropriate bucket
 export async function uploadFile(
-  file: File,
+  sectionId: string,
   type: FileType,
-  sectionId: string
+  file: File | null
 ): Promise<string | null> {
+  if (!file) {
+    throw new Error('No file provided')
+  }
+
   try {
-    const fileExtension = file.name.split('.').pop()
+    const fileExtension = file.name.split('.').pop()?.toLowerCase()
     const bucket = type === 'timetable' ? TIMETABLE_BUCKET : ENROLLMENT_BUCKET
-    const path = `${sectionId}-${type}.${fileExtension}`
+    const fileName = `${sectionId}-${type}.${fileExtension}`
 
-    const { data, error } = await supabase.storage
+    // Upload file to storage
+    const { data: uploadData, error: uploadError } = await supabase.storage
       .from(bucket)
-      .upload(path, file)
+      .upload(fileName, file, {
+        cacheControl: '3600',
+        upsert: true
+      })
 
-    if (error) {
-      console.error(`Error uploading ${type}:`, error)
-      return null
+    if (uploadError) {
+      console.error(`Error uploading ${type} file:`, uploadError.message)
+      throw uploadError
     }
 
-    return data.path
+    if (!uploadData?.path) {
+      throw new Error('Upload successful but no path returned')
+    }
+
+    // Generate a UUID for the file reference
+    const { data: uuidData, error: uuidError } = await supabase
+      .rpc('generate_uuid')
+
+    if (uuidError) {
+      console.error('Error generating UUID:', uuidError.message)
+      // Clean up the uploaded file
+      await supabase.storage.from(bucket).remove([uploadData.path])
+      throw uuidError
+    }
+
+    // Update the section with the UUID and store the mapping
+    const { error: updateError } = await supabase
+      .from('files')
+      .insert([{
+        id: uuidData,
+        path: uploadData.path,
+        bucket: bucket,
+        section_id: sectionId,
+        type: type
+      }])
+
+    if (updateError) {
+      console.error(`Error creating file record:`, updateError.message)
+      // Clean up the uploaded file
+      await supabase.storage.from(bucket).remove([uploadData.path])
+      throw updateError
+    }
+
+    // Update the section with the file UUID
+    const { error: sectionError } = await supabase
+      .from('sections')
+      .update({ [`${type}_file_id`]: uuidData })
+      .eq('id', sectionId)
+
+    if (sectionError) {
+      console.error(`Error updating section:`, sectionError.message)
+      // Clean up the file record and uploaded file
+      await supabase.from('files').delete().eq('id', uuidData)
+      await supabase.storage.from(bucket).remove([uploadData.path])
+      throw sectionError
+    }
+
+    // Get the public URL
+    const { data: { publicUrl } } = supabase.storage
+      .from(bucket)
+      .getPublicUrl(uploadData.path)
+
+    return publicUrl
   } catch (error) {
-    console.error(`Error in uploadFile:`, error)
-    return null
+    console.error(`Error in uploadFile (${type}):`, error instanceof Error ? error.message : error)
+    throw error
   }
 }
 
@@ -101,33 +179,60 @@ export async function getFileUrl(
 export async function deleteFile(
   sectionId: string,
   type: FileType
-): Promise<boolean> {
+): Promise<void> {
   try {
-    const bucket = type === 'timetable' ? TIMETABLE_BUCKET : ENROLLMENT_BUCKET
-    
-    const { data: files } = await supabase.storage
-      .from(bucket)
-      .list('', {
-        search: `${sectionId}-${type}`
-      })
+    // First get the file info from the files table
+    const { data: fileData, error: fetchError } = await supabase
+      .from('files')
+      .select('id, path, bucket')
+      .eq('section_id', sectionId)
+      .eq('type', type)
+      .single()
 
-    if (!files || files.length === 0) {
-      console.error('File not found for deletion:', sectionId)
-      return false
+    if (fetchError) {
+      if (fetchError.code === 'PGRST116') {
+        // No file found - this is okay, just return
+        return
+      }
+      console.error(`Error fetching file data:`, fetchError.message)
+      return
     }
 
-    const { error } = await supabase.storage
-      .from(bucket)
-      .remove([files[0].name])
-
-    if (error) {
-      console.error('Error deleting file:', error)
-      return false
+    if (!fileData) {
+      // No file found - this is okay, just return
+      return
     }
 
-    return true
+    // Try to delete the file from storage, but don't throw if it fails
+    try {
+      await supabase.storage
+        .from(fileData.bucket)
+        .remove([fileData.path])
+    } catch (storageError) {
+      console.warn(`Storage deletion failed for ${fileData.path}, continuing with cleanup:`, storageError)
+    }
+
+    // Delete the file record - this should succeed due to cascade delete
+    try {
+      await supabase
+        .from('files')
+        .delete()
+        .eq('id', fileData.id)
+    } catch (recordError) {
+      console.warn(`File record deletion failed, may have been deleted by cascade:`, recordError)
+    }
+
+    // Clear the file reference in the section if it still exists
+    try {
+      await supabase
+        .from('sections')
+        .update({ [`${type}_file_id`]: null })
+        .eq('id', sectionId)
+    } catch (updateError) {
+      console.warn(`Section update failed, may have been deleted:`, updateError)
+    }
   } catch (error) {
-    console.error('Error in deleteFile:', error)
-    return false
+    console.error(`Error in deleteFile (${type}):`, error instanceof Error ? error.message : error)
+    // Don't throw the error as this might be part of a section deletion
   }
 } 

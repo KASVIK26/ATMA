@@ -21,11 +21,12 @@ import {
 import { Label } from '@/components/ui/label'
 import { useToast } from '@/components/ui/use-toast'
 
-interface AddYearDialogProps {
+export interface AddYearDialogProps {
   branchId: string
   open: boolean
   onOpenChange: (open: boolean) => void
-  onSuccess: () => void
+  onSuccess: () => Promise<void>
+  maxYear: number
 }
 
 const toRomanNumeral = (num: number): string => {
@@ -44,7 +45,8 @@ export function AddYearDialog({
   branchId,
   open,
   onOpenChange,
-  onSuccess
+  onSuccess,
+  maxYear
 }: AddYearDialogProps) {
   const [yearNumber, setYearNumber] = useState<string>('')
   const [loading, setLoading] = useState(false)

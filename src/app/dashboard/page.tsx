@@ -103,14 +103,15 @@ export default function DashboardPage() {
           if (years && years.length > 0) {
             const yearIds = years.map(y => y.id)
 
-            // Count sections with enrollment files
+            // For now, just count sections that have enrollment files
+            // This will be updated later to actually count students from enrollment files
             const { count: sCount } = await supabase
               .from('sections')
               .select('id', { count: 'exact' })
               .in('year_id', yearIds)
               .not('enrollment_file_id', 'is', null)
 
-            studentsCount = sCount || 0
+            studentsCount = 0 // Set to 0 until enrollment file parsing is implemented
           }
         }
       }

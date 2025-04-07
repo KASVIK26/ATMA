@@ -1,7 +1,6 @@
 'use client'
 
-import { useState, useEffect } from 'react'
-import { supabase } from '@/lib/supabase'
+import { useEffect, useState } from 'react'
 import { Button } from '@/components/ui/button'
 import {
   Dialog,
@@ -13,6 +12,7 @@ import {
 } from '@/components/ui/dialog'
 import { Input } from '@/components/ui/input'
 import { Label } from '@/components/ui/label'
+import { supabase } from '@/lib/supabase'
 import { useToast } from '@/components/ui/use-toast'
 import { uploadFile, deleteFile } from '@/lib/storage'
 
@@ -20,7 +20,7 @@ interface AddSectionDialogProps {
   yearId: string
   open: boolean
   onOpenChange: (open: boolean) => void
-  onSuccess: () => void
+  onSuccess: () => Promise<void>
 }
 
 export function AddSectionDialog({
@@ -33,249 +33,294 @@ export function AddSectionDialog({
   const [timetableFile, setTimetableFile] = useState<File | null>(null)
   const [enrollmentFile, setEnrollmentFile] = useState<File | null>(null)
   const [loading, setLoading] = useState(false)
-  const [authChecked, setAuthChecked] = useState(false)
+  const [hasAccess, setHasAccess] = useState(false)
   const { toast } = useToast()
 
   useEffect(() => {
-    const checkAuth = async () => {
-      const { data: { session }, error } = await supabase.auth.getSession()
-      if (error) {
-        console.error('Auth check error:', error)
-      }
-      console.log('Current auth state:', {
-        isAuthenticated: !!session,
-        user: session?.user
-      })
-      setAuthChecked(true)
-    }
-    checkAuth()
-  }, [])
-
-  useEffect(() => {
     const verifyAccess = async () => {
-      if (!yearId) return
-
       try {
-        // Verify the year exists and user has access
-        const { data: yearData, error: yearError } = await supabase
+        const { data: { user } } = await supabase.auth.getUser()
+        if (!user) {
+          setHasAccess(false)
+          return
+        }
+
+        // First get the year to verify it exists
+        const { data: year, error: yearError } = await supabase
           .from('years')
           .select(`
-            id, 
-            branch_id,
-            sections (name)
+            id,
+            branches!years_branch_id_fkey (
+              id,
+              programs!branches_program_id_fkey (
+                id,
+                university_id
+              )
+            )
           `)
           .eq('id', yearId)
           .single()
 
         if (yearError) {
-          console.error('Error verifying year access:', yearError)
-          toast({
-            variant: 'destructive',
-            title: 'Error',
-            description: 'Failed to verify access to this year',
-          })
-          onOpenChange(false)
+          console.error('Error fetching year:', yearError.message)
+          setHasAccess(false)
           return
         }
 
-        if (!yearData) {
-          toast({
-            variant: 'destructive',
-            title: 'Error',
-            description: 'Year not found or access denied',
-          })
-          onOpenChange(false)
+        if (!year) {
+          console.error('Year not found')
+          setHasAccess(false)
           return
         }
 
-        // Check for duplicate section name
-        const existingSections = yearData.sections as { name: string }[]
-        if (existingSections.some(s => s.name.toLowerCase() === name.trim().toLowerCase())) {
-          toast({
-            variant: 'destructive',
-            title: 'Error',
-            description: 'A section with this name already exists',
-          })
+        // Then verify user has access to this university
+        const { data: userData, error: userError } = await supabase
+          .from('users')
+          .select('university_id')
+          .eq('id', user.id)
+          .single()
+
+        if (userError) {
+          console.error('Error fetching user data:', userError.message)
+          setHasAccess(false)
           return
         }
+
+        // Check if user's university matches the year's university
+        const yearUniversityId = year.branches?.programs?.university_id
+        setHasAccess(userData.university_id === yearUniversityId)
       } catch (error) {
-        console.error('Error in access verification:', error)
+        console.error('Error verifying access:', error)
+        setHasAccess(false)
       }
     }
 
-    if (open && name) {
+    if (open) {
       verifyAccess()
     }
-  }, [yearId, open, onOpenChange, name])
+  }, [yearId, open])
 
-  const handleSubmit = async () => {
-    if (!authChecked) {
+  const handleSubmit = async (e: React.FormEvent) => {
+    e.preventDefault()
+    if (!name.trim() || loading || !hasAccess) return
+
+    // Validate required files
+    if (!timetableFile) {
       toast({
         variant: 'destructive',
         title: 'Error',
-        description: 'Please wait while we verify your authentication',
+        description: 'Please upload a timetable file'
       })
       return
     }
 
-    if (!name || !timetableFile || !enrollmentFile) {
+    if (!enrollmentFile) {
       toast({
         variant: 'destructive',
         title: 'Error',
-        description: 'Please fill in all fields and upload both files',
-      })
-      return
-    }
-
-    // Validate file types
-    if (!timetableFile.type.match(/(pdf|jpe?g|png)$/i)) {
-      toast({
-        variant: 'destructive',
-        title: 'Error',
-        description: 'Timetable must be a PDF, JPG, or PNG file',
-      })
-      return
-    }
-
-    if (!enrollmentFile.name.match(/\.(xlsx|xls)$/i)) {
-      toast({
-        variant: 'destructive',
-        title: 'Error',
-        description: 'Enrollment list must be an Excel file',
+        description: 'Please upload an enrollment file'
       })
       return
     }
 
     setLoading(true)
-    try {
-      console.log('Starting section creation process...')
+    let createdSectionId: string | null = null
 
-      // First create the section to get its ID
-      const { data: sectionData, error: sectionError } = await supabase
+    try {
+      // First create the section
+      const { data: section, error: sectionError } = await supabase
         .from('sections')
-        .insert([{
-          name: name.trim(),
-          year_id: yearId
+        .insert([{ 
+          name: name.trim(), 
+          year_id: yearId,
+          timetable_file_id: null,
+          enrollment_file_id: null
         }])
         .select()
         .single()
 
       if (sectionError) {
-        console.error('Error creating section:', sectionError)
+        console.error('Error creating section:', sectionError.message)
         throw new Error('Failed to create section')
       }
 
-      if (!sectionData) {
-        throw new Error('No section data returned')
+      if (!section) {
+        throw new Error('Section created but no data returned')
       }
 
-      console.log('Section created:', sectionData)
+      createdSectionId = section.id
 
-      // Upload timetable file
-      const timetablePath = await uploadFile(timetableFile, 'timetable', sectionData.id)
-      if (!timetablePath) {
-        throw new Error('Failed to upload timetable file')
+      // Then upload the files
+      try {
+        const [timetableUrl, enrollmentUrl] = await Promise.all([
+          uploadFile(section.id, 'timetable', timetableFile),
+          uploadFile(section.id, 'enrollment', enrollmentFile)
+        ])
+
+        if (!timetableUrl || !enrollmentUrl) {
+          throw new Error('Failed to upload one or more files')
+        }
+
+        toast({
+          title: 'Success',
+          description: 'Section created successfully with files'
+        })
+
+        setName('')
+        setTimetableFile(null)
+        setEnrollmentFile(null)
+        onOpenChange(false)
+        await onSuccess()
+      } catch (uploadError) {
+        console.error('Error uploading files:', uploadError instanceof Error ? uploadError.message : uploadError)
+        
+        // If file upload fails, clean up
+        if (createdSectionId) {
+          // First try to delete any uploaded files
+          try {
+            await Promise.all([
+              deleteFile(createdSectionId, 'timetable').catch(() => {}),
+              deleteFile(createdSectionId, 'enrollment').catch(() => {})
+            ])
+          } catch (deleteError) {
+            console.error('Error cleaning up files:', deleteError)
+          }
+
+          // Then delete the section
+          try {
+            const { error: deleteError } = await supabase
+              .from('sections')
+              .delete()
+              .eq('id', createdSectionId)
+
+            if (deleteError) {
+              console.error('Error deleting section:', deleteError.message)
+            }
+          } catch (deleteError) {
+            console.error('Error deleting section:', deleteError)
+          }
+        }
+
+        throw new Error('Failed to upload files')
       }
-      console.log('Timetable file uploaded:', timetablePath)
-
-      // Upload enrollment file
-      const enrollmentPath = await uploadFile(enrollmentFile, 'enrollment', sectionData.id)
-      if (!enrollmentPath) {
-        // If enrollment upload fails, delete the timetable file
-        await deleteFile(sectionData.id, 'timetable')
-        throw new Error('Failed to upload enrollment file')
-      }
-      console.log('Enrollment file uploaded:', enrollmentPath)
-
-      toast({
-        title: 'Success',
-        description: 'Section added successfully',
-      })
-      onOpenChange(false)
-      onSuccess()
-      setName('')
-      setTimetableFile(null)
-      setEnrollmentFile(null)
     } catch (error) {
-      console.error('Error adding section:', {
-        error,
-        yearId,
-        name,
-        timetableFile: timetableFile?.name,
-        enrollmentFile: enrollmentFile?.name,
-        errorMessage: error instanceof Error ? error.message : 'Unknown error',
-        stack: error instanceof Error ? error.stack : undefined
-      })
+      console.error('Error in section creation:', error instanceof Error ? error.message : error)
       toast({
         variant: 'destructive',
         title: 'Error',
-        description: error instanceof Error 
-          ? error.message 
-          : 'Failed to add section - Please check your permissions',
+        description: error instanceof Error ? error.message : 'Failed to create section'
       })
     } finally {
       setLoading(false)
     }
   }
 
+  const validateTimetableFile = (file: File) => {
+    const validTypes = [
+      'application/vnd.openxmlformats-officedocument.wordprocessingml.document' // .docx
+    ]
+    return validTypes.includes(file.type)
+  }
+
+  const validateEnrollmentFile = (file: File) => {
+    const validTypes = [
+      'application/vnd.openxmlformats-officedocument.wordprocessingml.document', // .docx
+      'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet', // .xlsx
+      'application/vnd.ms-excel' // .xls
+    ]
+    return validTypes.includes(file.type)
+  }
+
   return (
     <Dialog open={open} onOpenChange={onOpenChange}>
-      <DialogContent className="sm:max-w-[425px]">
+      <DialogContent className="sm:max-w-[500px]">
         <DialogHeader>
           <DialogTitle>Add Section</DialogTitle>
           <DialogDescription>
-            Add a new section with timetable and enrollment list.
+            Create a new section with timetable and enrollment list.
           </DialogDescription>
         </DialogHeader>
-        <div className="grid gap-4 py-4">
-          <div className="grid gap-2">
-            <Label htmlFor="name">Section Name</Label>
-            <Input
-              id="name"
-              value={name}
-              onChange={(e) => setName(e.target.value)}
-              placeholder="e.g., Section A"
-            />
+
+        <form onSubmit={handleSubmit}>
+          <div className="space-y-6 py-4">
+            <div className="space-y-2">
+              <Label htmlFor="name">Section Name</Label>
+              <Input
+                id="name"
+                placeholder="Enter section name"
+                value={name}
+                onChange={(e) => setName(e.target.value)}
+                required
+              />
+            </div>
+
+            <div className="space-y-2">
+              <Label htmlFor="timetable">Timetable</Label>
+              <Input
+                id="timetable"
+                type="file"
+                accept=".docx"
+                onChange={(e) => {
+                  const file = e.target.files?.[0]
+                  if (file) {
+                    if (!validateTimetableFile(file)) {
+                      toast({
+                        variant: 'destructive',
+                        title: 'Invalid File',
+                        description: 'Please upload a DOCX file for timetable'
+                      })
+                      e.target.value = ''
+                      return
+                    }
+                    setTimetableFile(file)
+                  }
+                }}
+                required
+              />
+              <p className="text-sm text-muted-foreground">
+                Upload timetable (DOCX file only)
+              </p>
+            </div>
+
+            <div className="space-y-2">
+              <Label htmlFor="enrollment">Enrollment List</Label>
+              <Input
+                id="enrollment"
+                type="file"
+                accept=".xlsx,.xls,.docx"
+                onChange={(e) => {
+                  const file = e.target.files?.[0]
+                  if (file) {
+                    if (!validateEnrollmentFile(file)) {
+                      toast({
+                        variant: 'destructive',
+                        title: 'Invalid File',
+                        description: 'Please upload an Excel or DOCX file for enrollment'
+                      })
+                      e.target.value = ''
+                      return
+                    }
+                    setEnrollmentFile(file)
+                  }
+                }}
+                required
+              />
+              <p className="text-sm text-muted-foreground">
+                Upload enrollment list (Excel or DOCX file)
+              </p>
+            </div>
           </div>
-          <div className="grid gap-2">
-            <Label htmlFor="timetable">Timetable</Label>
-            <Input
-              id="timetable"
-              type="file"
-              accept=".pdf,.jpg,.jpeg,.png"
-              onChange={(e) => {
-                const file = e.target.files?.[0]
-                if (file) setTimetableFile(file)
-              }}
-            />
-            <p className="text-sm text-muted-foreground">
-              Upload timetable (PDF, JPG, or PNG)
-            </p>
-          </div>
-          <div className="grid gap-2">
-            <Label htmlFor="enrollment">Enrollment List</Label>
-            <Input
-              id="enrollment"
-              type="file"
-              accept=".xlsx,.xls"
-              onChange={(e) => {
-                const file = e.target.files?.[0]
-                if (file) setEnrollmentFile(file)
-              }}
-            />
-            <p className="text-sm text-muted-foreground">
-              Upload enrollment list (Excel file)
-            </p>
-          </div>
-        </div>
-        <DialogFooter>
-          <Button onClick={() => onOpenChange(false)} variant="outline">
-            Cancel
-          </Button>
-          <Button onClick={handleSubmit} disabled={loading}>
-            {loading ? 'Adding...' : 'Add Section'}
-          </Button>
-        </DialogFooter>
+
+          <DialogFooter>
+            <Button
+              type="submit"
+              disabled={!name.trim() || loading || !hasAccess}
+              className={!name.trim() ? "opacity-50 cursor-not-allowed" : ""}
+            >
+              {loading ? 'Creating...' : 'Create Section'}
+            </Button>
+          </DialogFooter>
+        </form>
       </DialogContent>
     </Dialog>
   )
